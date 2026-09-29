@@ -1,0 +1,22 @@
+{
+    "permissions": {
+        "additionalDirectories": [
+            "./agents/python-developer.md"
+        ],
+        "allow": [
+            "Read",
+            "Grep",
+            "Glob",
+            "Edit",
+            "Write",
+            "Bash(git diff:*)",
+            "Bash(git status:*)"
+        ],
+        "deny": [
+            "Bash(git push:*)",
+            "Bash(curl:*)",
+            "Bash(rm:*)",
+            "WebFetch"
+        ]
+    }
+}

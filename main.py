@@ -1,94 +1,84 @@
 import datetime
-
-# Conversion rates to USD. Unknown currencies fall back to DEFAULT_USD_RATE.
-USD_RATES = {
-    "USD": 1.0,
-    "EUR": 1.08,
-    "GBP": 1.27,
-    "AED": 0.27,
-}
-DEFAULT_USD_RATE = 1.0
-
-# Merchant category codes considered high risk for fraud screening.
-HIGH_RISK_MERCHANT_CATEGORIES = (6011, 6012, 4829)
-FRAUD_THRESHOLD_USD = 5000
-SEVERE_FRAUD_THRESHOLD_USD = 10000
-
-CARD_NUMBER_LENGTH = 16
-
-# global state, no config object
-tx_log = []
-fraud_count = 0
+import math
+from dataclasses import dataclass, field
 
 
-def _to_usd(amount, currency):
-    return amount * USD_RATES.get(currency, DEFAULT_USD_RATE)
+@dataclass(frozen=True)
+class Config:
+    # Conversion rates to USD. Currencies not listed here are rejected.
+    usd_rates: dict = field(default_factory=lambda: {
+        "USD": 1.0,
+        "EUR": 1.08,
+        "GBP": 1.27,
+        "AED": 0.27,
+    })
+    card_number_length: int = 16
 
 
-def _check_fraud(usd_amount, merchant_category):
-    """Return True if the transaction should be flagged; updates fraud_count.
-
-    A high-risk transaction above the severe threshold counts twice.
-    """
-    global fraud_count
-    if merchant_category not in HIGH_RISK_MERCHANT_CATEGORIES:
-        return False
-    flagged = False
-    if usd_amount > FRAUD_THRESHOLD_USD:
-        fraud_count = fraud_count + 1
-        flagged = True
-    if usd_amount > SEVERE_FRAUD_THRESHOLD_USD:
-        fraud_count = fraud_count + 1
-    return flagged
+class ValidationError(ValueError):
+    pass
 
 
-def _mask_card(card_number):
-    if card_number is None:
-        return "MISSING"
-    if len(card_number) != CARD_NUMBER_LENGTH:
-        return "INVALID"
-    return card_number[:4] + "********" + card_number[12:]
-
-
-def process(transaction_id, amount, currency, card_number, merchant_category):
-    if transaction_id is None or transaction_id == "":
-        print("bad id")
-        return None
-    if amount is None:
-        return None
+def _validate(config, transaction_id, amount, currency, card_number, merchant_category):
+    if not isinstance(transaction_id, str) or not transaction_id.strip():
+        raise ValidationError("transaction_id must be a non-empty string")
+    if isinstance(amount, bool) or not isinstance(amount, (int, float)):
+        raise ValidationError("amount must be a number")
+    if not math.isfinite(amount):
+        raise ValidationError("amount must be finite")
     if amount < 0:
-        print("negative amount, skipping")
-        return None
-
-    usd_amount = _to_usd(amount, currency)
-    flagged = _check_fraud(usd_amount, merchant_category)
-
-    result = {
-        "id": transaction_id,
-        "amount": amount,
-        "currency": currency,
-        "usd_amount": usd_amount,
-        "card": _mask_card(card_number),
-        "flagged": flagged,
-        "time": str(datetime.datetime.now()),
-    }
-    tx_log.append(result)
-
-    if flagged:
-        print("FRAUD ALERT: " + str(transaction_id) + " amount=" + str(usd_amount))
-    else:
-        print("ok: " + str(transaction_id))
-
-    return result
+        raise ValidationError("amount must not be negative")
+    if currency not in config.usd_rates:
+        raise ValidationError("unsupported currency: " + repr(currency))
+    if card_number is not None and not isinstance(card_number, str):
+        raise ValidationError("card_number must be a string or None")
+    if isinstance(merchant_category, bool) or not isinstance(merchant_category, int):
+        raise ValidationError("merchant_category must be an integer")
 
 
-def process_batch(list_of_tx):
-    results = []
-    for tx in list_of_tx:
-        result = process(tx[0], tx[1], tx[2], tx[3], tx[4])
-        if result is not None:
-            results.append(result)
-    return results
+class TransactionProcessor:
+    def __init__(self, config=None):
+        self.config = config or Config()
+        self.tx_log = []
+
+    def _to_usd(self, amount, currency):
+        return amount * self.config.usd_rates[currency]
+
+    def _mask_card(self, card_number):
+        if card_number is None:
+            return "MISSING"
+        if len(card_number) != self.config.card_number_length or not card_number.isdigit():
+            return "INVALID"
+        return card_number[:4] + "*" * (len(card_number) - 8) + card_number[-4:]
+
+    def process(self, transaction_id, amount, currency, card_number, merchant_category):
+        """Validate and record a transaction. Raises ValidationError on bad input."""
+        _validate(self.config, transaction_id, amount, currency, card_number, merchant_category)
+
+        result = {
+            "id": transaction_id,
+            "amount": amount,
+            "currency": currency,
+            "usd_amount": self._to_usd(amount, currency),
+            "card": self._mask_card(card_number),
+            "merchant_category": merchant_category,
+            "time": str(datetime.datetime.now()),
+        }
+        self.tx_log.append(result)
+        print("ok: " + transaction_id)
+        return result
+
+    def process_batch(self, list_of_tx):
+        """Process each transaction, skipping (and reporting) invalid ones."""
+        results = []
+        for tx in list_of_tx:
+            try:
+                if len(tx) != 5:
+                    raise ValidationError("expected 5 fields, got " + str(len(tx)))
+                results.append(self.process(*tx))
+            except ValidationError as e:
+                print("skipping " + repr(tx[0] if tx else None) + ": " + str(e))
+        return results
 
 
 # sample data to run it
@@ -100,6 +90,6 @@ if __name__ == "__main__":
         ("TX1004", 200, "AED", None, 6012),
         ("TX1005", 9000, "USD", "4111111111111111", 4829),
     ]
-    out = process_batch(sample)
+    processor = TransactionProcessor(Config())
+    out = processor.process_batch(sample)
     print("processed:", len(out))
-    print("fraud flagged so far:", fraud_count)
